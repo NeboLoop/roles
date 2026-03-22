@@ -1,0 +1,9 @@
+{
+  "id": "builder",
+  "name": "Builder",
+  "version": "1.0.0",
+  "type": "role",
+  "description": "Systematically builds all NeboLoop marketplace skills and roles from plans and reference materials",
+  "author": "nebo",
+  "tags": ["internal", "builder", "automation"]
+}
