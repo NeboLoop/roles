@@ -1,0 +1,8 @@
+{
+  "type": "role",
+  "name": "Search Visibility Monitor",
+  "version": "1.0.0",
+  "description": "Track where your brand appears across Google, ChatGPT, Perplexity, and Gemini — one dashboard for all of modern search",
+  "tags": ["seo", "ai-search", "visibility", "monitoring", "competitive-intel"],
+  "author": "NeboLoop"
+}
