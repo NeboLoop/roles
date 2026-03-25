@@ -1,0 +1,8 @@
+{
+  "type": "role",
+  "name": "Social Media Manager",
+  "version": "1.0.0",
+  "description": "Monitor mentions, create content, schedule posts — across X, LinkedIn, and Instagram. Your always-on social team.",
+  "tags": ["social-media", "content", "monitoring", "engagement", "automation"],
+  "author": "NeboLoop"
+}

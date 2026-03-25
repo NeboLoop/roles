@@ -1,0 +1,8 @@
+{
+  "type": "role",
+  "name": "Daily Briefer",
+  "version": "1.0.0",
+  "description": "Every morning: what happened overnight, what's on your calendar, what needs your attention — all in 60 seconds",
+  "tags": ["briefing", "news", "research", "productivity", "morning-routine"],
+  "author": "NeboLoop"
+}

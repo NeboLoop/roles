@@ -1,0 +1,8 @@
+{
+  "type": "role",
+  "name": "Inbox Manager",
+  "version": "1.0.0",
+  "description": "Wake up to a clean inbox. Emails triaged, replies drafted, urgent items flagged.",
+  "tags": ["email", "inbox", "productivity", "automation", "gmail"],
+  "author": "NeboLoop"
+}
