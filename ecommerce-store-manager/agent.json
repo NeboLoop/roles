@@ -1,0 +1,385 @@
+{
+  "inputs": [
+    {
+      "key": "report_recipient",
+      "label": "Report recipient email",
+      "description": "Where daily reports and alerts are emailed (defaults to the owner)",
+      "type": "text",
+      "required": false,
+      "placeholder": "owner@store.com"
+    },
+    {
+      "key": "low_stock_days",
+      "label": "Low-stock threshold (days)",
+      "description": "Flag a SKU when projected days of stock left falls below this",
+      "type": "text",
+      "required": false,
+      "default": "7",
+      "placeholder": "7"
+    },
+    {
+      "key": "reorder_lead_time_days",
+      "label": "Reorder lead time (days)",
+      "description": "How long a restock takes — used to project stockouts",
+      "type": "text",
+      "required": false,
+      "default": "10",
+      "placeholder": "10"
+    },
+    {
+      "key": "stuck_processing_hours",
+      "label": "Stuck-order window (hours)",
+      "description": "Flag orders still in processing/pending past this many hours",
+      "type": "text",
+      "required": false,
+      "default": "48",
+      "placeholder": "48"
+    },
+    {
+      "key": "use_analytics",
+      "label": "Include analytics context",
+      "description": "Pull sessions and conversion rate to explain sales changes",
+      "type": "select",
+      "required": false,
+      "default": "yes",
+      "options": [
+        {
+          "value": "yes",
+          "label": "Yes, include traffic context"
+        },
+        {
+          "value": "no",
+          "label": "No, store data only"
+        }
+      ]
+    },
+    {
+      "key": "review_window_days",
+      "label": "Product review window (days)",
+      "description": "Lookback window for the product performance review",
+      "type": "text",
+      "required": false,
+      "default": "30",
+      "placeholder": "30"
+    }
+  ],
+  "workflows": {
+    "daily-sales-report": {
+      "trigger": {
+        "type": "schedule",
+        "cron": "0 8 * * *"
+      },
+      "activities": [
+        {
+          "id": "pull-sales",
+          "intent": "Pull yesterday's sales totals and comparison periods from the store platform",
+          "model": "nebo-1",
+          "steps": [
+            "Read the store connection; it resolves whichever platform the company runs",
+            "Pull the reporting day's orders with totals, refunds, and discounts from the store",
+            "Mark any figure the store cannot return as not available rather than estimating it",
+            "Compute yesterday's revenue, order count, and average order value",
+            "Pull the same metrics for the prior day, the prior same weekday, and the trailing 30-day daily average",
+            "Subtract refunds and total discounts to compute net revenue and discount load percent",
+            "Return a structured sales block with every figure paired to its comparison basis"
+          ],
+          "token_budget": {
+            "max": 8000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "traffic-context",
+          "intent": "Add traffic and conversion context to explain the day's sales movement",
+          "model": "nebo-1",
+          "steps": [
+            "If use_analytics is no, or no analytics connection is bound, skip this activity and continue",
+            "Resolve the store's analytics property through the analytics connection",
+            "Pull sessions, users, and ecommerce conversion rate for the reporting day and comparison periods",
+            "Compare conversion and session trends against the sales block from pull-sales",
+            "Diagnose any revenue change as fewer visitors versus a lower conversion rate and state which",
+            "Return a short context block; if analytics is unavailable, mark it skipped rather than blocking the report"
+          ],
+          "token_budget": {
+            "max": 2000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "skip"
+          }
+        },
+        {
+          "id": "compile-report",
+          "intent": "Compile and deliver the daily sales report with movers and a watch list",
+          "model": "nebo-1",
+          "steps": [
+            "Build the headline line: revenue, orders, and AOV each with delta and comparison basis",
+            "Rank top movers up and down by revenue impact using the sales block",
+            "Fold in the traffic-context block to explain the day's direction in one read",
+            "Assemble a watch list of stuck orders, failed payments, and low-stock SKUs if any were surfaced by other workflows",
+            "Write the single most important action for the day as a one-line read",
+            "If the day is clean and within normal range, produce a one-line all-clear instead of padded sections",
+            "Send the report to report_recipient by email, defaulting to the owner",
+            "Emit report.ready with the headline metrics, mover lists, and watch list"
+          ],
+          "token_budget": {
+            "max": 2500
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
+        }
+      ],
+      "budget": {
+        "total_per_run": 14375
+      },
+      "emit": "report.ready"
+    },
+    "order-issue-scan": {
+      "trigger": {
+        "type": "heartbeat",
+        "interval": "2h",
+        "window": "07:00-21:00"
+      },
+      "activities": [
+        {
+          "id": "scan-pipeline",
+          "intent": "Scan the order pipeline for stuck, failed, and unfulfilled paid orders",
+          "model": "nebo-1",
+          "steps": [
+            "Read the store connection; it resolves whichever platform the company runs",
+            "Pull the order pipeline: processing, pending, on-hold, failed, and paid-but-unfulfilled",
+            "Confirm fulfillment and tracking on paid orders",
+            "Flag any order state the store cannot return rather than inferring it",
+            "Flag orders stuck past stuck_processing_hours and on-hold orders past 72 hours",
+            "Flag paid orders with no fulfillment or tracking past the threshold and any failed or pending-capture payments",
+            "Detect recent refunds, chargebacks, and repeated failed attempts from one customer",
+            "Apply the alert cooldown so an already-reported issue is not re-flagged unless it crossed a worse threshold",
+            "Return a structured issue list with order ID, state, age, customer, and amount"
+          ],
+          "token_budget": {
+            "max": 8000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "alert-issues",
+          "intent": "Notify the owner of new order issues with full context",
+          "model": "nebo-1",
+          "steps": [
+            "If the issue list is empty, do nothing and end the run silently",
+            "Sort issues by impact: oldest stuck orders and highest-value failed payments first",
+            "Summarize each issue with order ID, state, age, customer, amount, and the likely cause",
+            "Group issues by type so stuck orders, failed payments, and unfulfilled paid orders are clearly separated",
+            "Email the alert to report_recipient by email, defaulting to the owner",
+            "Emit order.issue with the full issue list so a support or fulfillment agent can intervene"
+          ],
+          "token_budget": {
+            "max": 2000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
+        }
+      ],
+      "budget": {
+        "total_per_run": 11500
+      },
+      "emit": "order.issue"
+    },
+    "inventory-alerts": {
+      "trigger": {
+        "type": "heartbeat",
+        "interval": "6h",
+        "window": "07:00-21:00"
+      },
+      "activities": [
+        {
+          "id": "project-stock",
+          "intent": "Project days of stock left per SKU from current inventory and sell-through",
+          "model": "nebo-1",
+          "steps": [
+            "Read the store connection; it resolves whichever platform the company runs",
+            "Pull current stock per SKU and variant from the store",
+            "Compute a trailing daily sell-through rate per SKU from recent order volume and divide current stock by it for days of stock left",
+            "Flag any SKU projected to hit zero before reorder_lead_time_days elapses or below low_stock_days",
+            "Rank flagged SKUs by velocity-weighted urgency so fast movers outrank slow movers",
+            "Apply the alert cooldown so an unchanged low-stock SKU is not re-alerted within the window",
+            "Return the ranked low-stock list with SKU, current stock, days left, and velocity"
+          ],
+          "token_budget": {
+            "max": 8000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "alert-stock",
+          "intent": "Notify the owner of SKUs approaching stockout",
+          "model": "nebo-1",
+          "steps": [
+            "If no SKU crossed the threshold, do nothing and end the run silently",
+            "Format the low-stock list sorted by soonest-to-zero with days left and reorder urgency",
+            "Call out any SKU projected to stock out before lead time as a hard reorder-now flag",
+            "Include each SKU's current stock and trailing velocity so the reorder quantity is obvious",
+            "Email the alert to report_recipient by email, defaulting to the owner",
+            "Emit inventory.low with SKU, current stock, days of stock left, and velocity for an ordering agent"
+          ],
+          "token_budget": {
+            "max": 2000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
+        }
+      ],
+      "budget": {
+        "total_per_run": 11500
+      },
+      "emit": "inventory.low"
+    },
+    "product-performance-review": {
+      "trigger": {
+        "type": "schedule",
+        "cron": "0 9 * * 1"
+      },
+      "activities": [
+        {
+          "id": "rank-products",
+          "intent": "Rank products by revenue, units, and trend over the review window",
+          "model": "nebo-1",
+          "steps": [
+            "Read the review_window_days input",
+            "Pull per-product sales, catalog, and any cost data from the store for the window",
+            "Mark any per-product figure the store cannot return as not available",
+            "Compute units and revenue per product for the current window and the prior equal window",
+            "Identify top performers by revenue and units with trend, and decliners that sold last period and dropped sharply this one",
+            "Identify dead stock: products with inventory and zero sales over the window",
+            "Where cost data exists, rank by contribution margin so low-margin high-volume items are not mistaken for winners",
+            "Return ranked performer, decliner, and dead-stock lists with numbers"
+          ],
+          "token_budget": {
+            "max": 8000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "traffic-context-review",
+          "intent": "Add product-level traffic and conversion context where analytics is available",
+          "model": "nebo-1",
+          "steps": [
+            "If use_analytics is no, or no analytics connection is bound, skip this activity and continue",
+            "Resolve the store's analytics property through the analytics connection",
+            "Pull product or landing-page sessions and conversion over the review window",
+            "Flag products with high traffic but low conversion as merchandising or pricing problems",
+            "Flag declining products whose drop is explained by lost traffic versus lost conversion",
+            "Return a context block; if analytics is unavailable, mark it skipped without blocking the review"
+          ],
+          "token_budget": {
+            "max": 2000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "skip"
+          }
+        },
+        {
+          "id": "deliver-review",
+          "intent": "Compile and deliver the weekly product performance review",
+          "model": "nebo-1",
+          "steps": [
+            "Lead with the week's top performers by revenue and by margin with trend",
+            "Surface decliners as the priority section since they are the silent revenue leaks",
+            "List dead stock with current inventory value tied up",
+            "Fold in the traffic-context block to diagnose decliners and underperformers",
+            "Recommend concrete actions: promote, discount to clear, reorder, or retire",
+            "Send the review to report_recipient by email, defaulting to the owner",
+            "Emit report.ready with the ranked lists and recommended actions"
+          ],
+          "token_budget": {
+            "max": 2500
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
+        }
+      ],
+      "budget": {
+        "total_per_run": 14375
+      },
+      "emit": "report.ready"
+    },
+    "check-store": {
+      "trigger": {
+        "type": "manual"
+      },
+      "activities": [
+        {
+          "id": "store-snapshot",
+          "intent": "Give an on-demand snapshot of sales, open issues, and low stock right now",
+          "model": "nebo-1",
+          "steps": [
+            "Read the store connection; it resolves whichever platform the company runs",
+            "Pull today's running revenue, order count, and AOV with comparison to the same point on prior days",
+            "Scan the order pipeline for any currently stuck, failed, or unfulfilled paid orders",
+            "Pull current stock and compute days of stock left for the fastest-moving SKUs",
+            "Assemble a one-screen snapshot: sales headline, open issues count with worst offenders, low-stock SKUs by days left",
+            "Sort every section by impact and finish with the single most important action right now",
+            "If everything is within normal range, return a concise all-clear"
+          ],
+          "token_budget": {
+            "max": 12000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        }
+      ],
+      "budget": {
+        "total_per_run": 13800
+      }
+    }
+  },
+  "requires": {
+    "interfaces": [
+      "store",
+      "analytics",
+      "mail"
+    ]
+  },
+  "pricing": {
+    "model": "free",
+    "cost": 0.0
+  },
+  "defaults": {
+    "timezone": "user_local",
+    "configurable": [
+      "inputs.low_stock_days",
+      "inputs.reorder_lead_time_days",
+      "inputs.stuck_processing_hours",
+      "inputs.review_window_days",
+      "inputs.use_analytics",
+      "workflows.daily-sales-report.trigger.cron",
+      "workflows.order-issue-scan.trigger.interval",
+      "workflows.inventory-alerts.trigger.interval",
+      "workflows.product-performance-review.trigger.cron"
+    ]
+  },
+  "skills": []
+}
