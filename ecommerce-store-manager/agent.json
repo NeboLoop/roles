@@ -71,20 +71,28 @@
       },
       "activities": [
         {
+          "id": "orders",
+          "type": "operation",
+          "params": {
+            "operation": "store.order.list",
+            "input": {
+              "placedSinceDays": 32
+            }
+          },
+          "intent": "Read the last 32 days of orders, with totals, refunds, discounts and lines, from the store connection; it resolves whichever platform the company runs",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
           "id": "pull-sales",
-          "intent": "Pull yesterday's sales totals and comparison periods from the store platform",
-          "model": "nebo-1",
-          "steps": [
-            "Read the store connection; it resolves whichever platform the company runs",
-            "Pull the reporting day's orders with totals, refunds, and discounts from the store",
-            "Mark any figure the store cannot return as not available rather than estimating it",
-            "Compute yesterday's revenue, order count, and average order value",
-            "Pull the same metrics for the prior day, the prior same weekday, and the trailing 30-day daily average",
-            "Subtract refunds and total discounts to compute net revenue and discount load percent",
-            "Return a structured sales block with every figure paired to its comparison basis"
-          ],
-          "token_budget": {
-            "max": 8000
+          "type": "command",
+          "intent": "Compute yesterday's charged, gross and net revenue, refunds, discount load, order count and AOV, each beside the prior day, the prior same weekday and the trailing 30-day daily average, and the top movers up and down. Any figure the store cannot return is null and named in notAvailable, never estimated.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/sales_day.py --day yesterday --top 3",
+            "skill": "store-numbers",
+            "stdin": "nodes.orders.records"
           },
           "on_error": {
             "retry": 1,
@@ -95,13 +103,16 @@
           "id": "traffic-context",
           "intent": "Add traffic and conversion context to explain the day's sales movement",
           "model": "nebo-1",
+          "tools": [
+            "analytics_metric_series",
+            "analytics_metric_get"
+          ],
           "steps": [
-            "If use_analytics is no, or no analytics connection is bound, skip this activity and continue",
-            "Resolve the store's analytics property through the analytics connection",
-            "Pull sessions, users, and ecommerce conversion rate for the reporting day and comparison periods",
-            "Compare conversion and session trends against the sales block from pull-sales",
+            "If {{inputs.use_analytics}} is no, or no analytics connection is bound, answer {\"skipped\": true} and stop",
+            "Read sessions, users and ecommerce conversion rate for {{nodes.pull-sales.day}}, the prior day, the prior same weekday and the trailing 30 days through analytics.metric.series and analytics.metric.get",
+            "Compare those trends against the sales deltas in {{nodes.pull-sales.deltaPct}}",
             "Diagnose any revenue change as fewer visitors versus a lower conversion rate and state which",
-            "Return a short context block; if analytics is unavailable, mark it skipped rather than blocking the report"
+            "Answer only JSON: {\"skipped\": false, \"sessions\": {...}, \"conversion\": {...}, \"diagnosis\": \"...\"}; if analytics is unavailable answer {\"skipped\": true, \"reason\": \"...\"} rather than blocking the report"
           ],
           "token_budget": {
             "max": 2000
@@ -115,15 +126,16 @@
           "id": "compile-report",
           "intent": "Compile and deliver the daily sales report with movers and a watch list",
           "model": "nebo-1",
+          "tools": [
+            "mail_message_send"
+          ],
           "steps": [
-            "Build the headline line: revenue, orders, and AOV each with delta and comparison basis",
-            "Rank top movers up and down by revenue impact using the sales block",
-            "Fold in the traffic-context block to explain the day's direction in one read",
-            "Assemble a watch list of stuck orders, failed payments, and low-stock SKUs if any were surfaced by other workflows",
-            "Write the single most important action for the day as a one-line read",
-            "If the day is clean and within normal range, produce a one-line all-clear instead of padded sections",
-            "Send the report to report_recipient by email, defaulting to the owner",
-            "Emit report.ready with the headline metrics, mover lists, and watch list"
+            "Build the headline line from {{nodes.pull-sales.current}}: revenue, orders and AOV, each with its delta from {{nodes.pull-sales.deltaPct}} and the comparison basis. Quote the computed figures; never recompute or estimate one, and say \"not available from this store\" for each item in {{nodes.pull-sales.notAvailable}}",
+            "List the top movers up and down from {{nodes.pull-sales.moversUp}} and {{nodes.pull-sales.moversDown}} with their numbers",
+            "Fold in the traffic context from the previous step to explain the day's direction in one read; leave it out if it was skipped",
+            "Write the single most important action for the day as a one-line read; if the day is clean and within normal range, write a one-line all-clear instead of padded sections",
+            "Send the report with mail.message.send to {{inputs.report_recipient}}, or to the owner when it is blank",
+            "Emit report.ready with the headline metrics and mover lists"
           ],
           "token_budget": {
             "max": 2500
@@ -137,7 +149,29 @@
       "budget": {
         "total_per_run": 14375
       },
-      "emit": "report.ready"
+      "emit": "report.ready",
+      "connections": [
+        {
+          "from": "__trigger__",
+          "to": "orders"
+        },
+        {
+          "from": "orders",
+          "to": "pull-sales"
+        },
+        {
+          "from": "pull-sales",
+          "to": "traffic-context"
+        },
+        {
+          "from": "traffic-context",
+          "to": "compile-report"
+        },
+        {
+          "from": "compile-report",
+          "to": "__emit__"
+        }
+      ]
     },
     "order-issue-scan": {
       "trigger": {
@@ -147,22 +181,28 @@
       },
       "activities": [
         {
+          "id": "orders",
+          "type": "operation",
+          "params": {
+            "operation": "store.order.list",
+            "input": {
+              "placedSinceDays": 30
+            }
+          },
+          "intent": "Read the order pipeline of the last 30 days, every state, with payment and fulfillment status and tracking, from the store connection",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
           "id": "scan-pipeline",
-          "intent": "Scan the order pipeline for stuck, failed, and unfulfilled paid orders",
-          "model": "nebo-1",
-          "steps": [
-            "Read the store connection; it resolves whichever platform the company runs",
-            "Pull the order pipeline: processing, pending, on-hold, failed, and paid-but-unfulfilled",
-            "Confirm fulfillment and tracking on paid orders",
-            "Flag any order state the store cannot return rather than inferring it",
-            "Flag orders stuck past stuck_processing_hours and on-hold orders past 72 hours",
-            "Flag paid orders with no fulfillment or tracking past the threshold and any failed or pending-capture payments",
-            "Detect recent refunds, chargebacks, and repeated failed attempts from one customer",
-            "Apply the alert cooldown so an already-reported issue is not re-flagged unless it crossed a worse threshold",
-            "Return a structured issue list with order ID, state, age, customer, and amount"
-          ],
-          "token_budget": {
-            "max": 8000
+          "type": "command",
+          "intent": "Flag orders stuck in processing or pending past stuck_processing_hours and on hold past 72 hours, paid orders with no fulfillment or tracking past the same window, failed and uncaptured payments, recent refunds and chargebacks, and repeated failed attempts from one customer. Ages and thresholds are computed here; an order state the store cannot return is named in notAvailable, never inferred.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/order_issues.py --stuck-hours '{{inputs.stuck_processing_hours}}' --hold-hours 72 --recent-hours 24",
+            "skill": "store-numbers",
+            "stdin": "nodes.orders.records"
           },
           "on_error": {
             "retry": 1,
@@ -170,16 +210,71 @@
           }
         },
         {
+          "id": "any-issues",
+          "type": "condition",
+          "intent": "Go on only when the scan found an issue; an empty scan ends the run silently.",
+          "params": {
+            "mode": "expression",
+            "expression": "nodes.scan-pipeline.count > 0"
+          }
+        },
+        {
+          "id": "recall-alerted",
+          "intent": "Read the order alert log kept from the last alert",
+          "model": "nebo-1",
+          "tools": [
+            "recall"
+          ],
+          "steps": [
+            "Recall the memory \"store alert log: orders\"",
+            "Answer only JSON: {\"alerted\": \"<the logged key=tier pairs, exactly as stored, or an empty string>\"}"
+          ],
+          "token_budget": {
+            "max": 600
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
+        },
+        {
+          "id": "cooldown",
+          "type": "command",
+          "intent": "Apply the alert cooldown in code: an issue already reported is not flagged again while it stays open, unless it crossed a worse threshold.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/cooldown.py --alerted \"{{nodes.recall-alerted.alerted}}\"",
+            "skill": "store-numbers",
+            "stdin": "nodes.scan-pipeline.issues"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "new-issues",
+          "type": "condition",
+          "intent": "Alert only when an issue is new or worse; otherwise the run ends silently.",
+          "params": {
+            "mode": "expression",
+            "expression": "nodes.cooldown.count > 0"
+          }
+        },
+        {
           "id": "alert-issues",
           "intent": "Notify the owner of new order issues with full context",
           "model": "nebo-1",
+          "tools": [
+            "mail_message_send",
+            "remember"
+          ],
           "steps": [
-            "If the issue list is empty, do nothing and end the run silently",
-            "Sort issues by impact: oldest stuck orders and highest-value failed payments first",
-            "Summarize each issue with order ID, state, age, customer, amount, and the likely cause",
-            "Group issues by type so stuck orders, failed payments, and unfulfilled paid orders are clearly separated",
-            "Email the alert to report_recipient by email, defaulting to the owner",
-            "Emit order.issue with the full issue list so a support or fulfillment agent can intervene"
+            "Work from {{nodes.cooldown.alerts}}: sort by impact, oldest stuck orders and highest-value failed payments first, quoting each computed age and amount",
+            "Summarize each issue with order ID, state, age, customer, amount and the likely cause",
+            "Group issues by type so stuck orders, failed payments and unfulfilled paid orders are clearly separated, and say \"not available from this store\" for each item in {{nodes.scan-pipeline.notAvailable}}",
+            "Email the alert with mail.message.send to {{inputs.report_recipient}}, or to the owner when it is blank",
+            "Save {{nodes.cooldown.log}} to memory as \"store alert log: orders\", replacing the previous entry",
+            "Emit order.issue with the alerted issue list so a support or fulfillment agent can intervene"
           ],
           "token_budget": {
             "max": 2000
@@ -188,12 +283,82 @@
             "retry": 1,
             "fallback": "notify_owner"
           }
+        },
+        {
+          "id": "no-issues",
+          "type": "command",
+          "intent": "No order is stuck, failed or unfulfilled; the next scan reads the pipeline again.",
+          "params": {
+            "command": "echo '{\"summary\": \"No order is stuck, failed or unfulfilled; the next scan reads the pipeline again.\"}'"
+          },
+          "on_error": {
+            "retry": 0,
+            "fallback": "skip"
+          }
+        },
+        {
+          "id": "nothing-new",
+          "type": "command",
+          "intent": "Every open order issue was already alerted and none got worse; the next scan reads them again.",
+          "params": {
+            "command": "echo '{\"summary\": \"Every open order issue was already alerted and none got worse; the next scan reads them again.\"}'"
+          },
+          "on_error": {
+            "retry": 0,
+            "fallback": "skip"
+          }
         }
       ],
       "budget": {
         "total_per_run": 11500
       },
-      "emit": "order.issue"
+      "emit": "order.issue",
+      "connections": [
+        {
+          "from": "__trigger__",
+          "to": "orders"
+        },
+        {
+          "from": "orders",
+          "to": "scan-pipeline"
+        },
+        {
+          "from": "scan-pipeline",
+          "to": "any-issues"
+        },
+        {
+          "from": "any-issues",
+          "to": "recall-alerted",
+          "label": "True"
+        },
+        {
+          "from": "recall-alerted",
+          "to": "cooldown"
+        },
+        {
+          "from": "cooldown",
+          "to": "new-issues"
+        },
+        {
+          "from": "new-issues",
+          "to": "alert-issues",
+          "label": "True"
+        },
+        {
+          "from": "alert-issues",
+          "to": "__emit__"
+        },
+        {
+          "from": "any-issues",
+          "to": "no-issues",
+          "label": "False"
+        },
+        {
+          "from": "new-issues",
+          "to": "nothing-new",
+          "label": "False"
+        }
+      ]
     },
     "inventory-alerts": {
       "trigger": {
@@ -203,20 +368,41 @@
       },
       "activities": [
         {
-          "id": "project-stock",
-          "intent": "Project days of stock left per SKU from current inventory and sell-through",
-          "model": "nebo-1",
-          "steps": [
-            "Read the store connection; it resolves whichever platform the company runs",
-            "Pull current stock per SKU and variant from the store",
-            "Compute a trailing daily sell-through rate per SKU from recent order volume and divide current stock by it for days of stock left",
-            "Flag any SKU projected to hit zero before reorder_lead_time_days elapses or below low_stock_days",
-            "Rank flagged SKUs by velocity-weighted urgency so fast movers outrank slow movers",
-            "Apply the alert cooldown so an unchanged low-stock SKU is not re-alerted within the window",
-            "Return the ranked low-stock list with SKU, current stock, days left, and velocity"
-          ],
-          "token_budget": {
-            "max": 8000
+          "id": "stock",
+          "type": "operation",
+          "params": {
+            "operation": "store.inventory.get",
+            "input": {}
+          },
+          "intent": "Read current stock per SKU and variant from the store connection; it resolves whichever platform the company runs",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "sales",
+          "type": "operation",
+          "params": {
+            "operation": "store.order.list",
+            "input": {
+              "placedSinceDays": 30
+            }
+          },
+          "intent": "Read the last 30 days of orders for sell-through",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "keep-stock",
+          "type": "command",
+          "intent": "Keep the stock list in a per-run file so the projection can join it with the sales.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/stash.py",
+            "skill": "store-numbers",
+            "stdin": "nodes.stock.records"
           },
           "on_error": {
             "retry": 1,
@@ -224,16 +410,85 @@
           }
         },
         {
+          "id": "project-stock",
+          "type": "command",
+          "intent": "Compute a trailing daily sell-through per SKU and days of stock left, flag any SKU projected to hit zero before reorder_lead_time_days or below low_stock_days, and rank by velocity-weighted urgency so fast movers outrank slow movers.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/stock_cover.py --stock-file \"{{nodes.keep-stock.file}}\" --low-days '{{inputs.low_stock_days}}' --lead-days '{{inputs.reorder_lead_time_days}}' --window-days 30",
+            "skill": "store-numbers",
+            "stdin": "nodes.sales.records"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "any-low",
+          "type": "condition",
+          "intent": "Go on only when a SKU crossed a line; otherwise the run ends silently.",
+          "params": {
+            "mode": "expression",
+            "expression": "nodes.project-stock.count > 0"
+          }
+        },
+        {
+          "id": "recall-alerted",
+          "intent": "Read the stock alert log kept from the last alert",
+          "model": "nebo-1",
+          "tools": [
+            "recall"
+          ],
+          "steps": [
+            "Recall the memory \"store alert log: stock\"",
+            "Answer only JSON: {\"alerted\": \"<the logged key=tier pairs, exactly as stored, or an empty string>\"}"
+          ],
+          "token_budget": {
+            "max": 600
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
+        },
+        {
+          "id": "cooldown",
+          "type": "command",
+          "intent": "Apply the alert cooldown in code: an unchanged low-stock SKU is not re-alerted while it stays low, only when it gets worse.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/cooldown.py --alerted \"{{nodes.recall-alerted.alerted}}\"",
+            "skill": "store-numbers",
+            "stdin": "nodes.project-stock.flagged"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "new-low",
+          "type": "condition",
+          "intent": "Alert only when a SKU is newly low or worse; otherwise the run ends silently.",
+          "params": {
+            "mode": "expression",
+            "expression": "nodes.cooldown.count > 0"
+          }
+        },
+        {
           "id": "alert-stock",
           "intent": "Notify the owner of SKUs approaching stockout",
           "model": "nebo-1",
+          "tools": [
+            "mail_message_send",
+            "remember"
+          ],
           "steps": [
-            "If no SKU crossed the threshold, do nothing and end the run silently",
-            "Format the low-stock list sorted by soonest-to-zero with days left and reorder urgency",
-            "Call out any SKU projected to stock out before lead time as a hard reorder-now flag",
-            "Include each SKU's current stock and trailing velocity so the reorder quantity is obvious",
-            "Email the alert to report_recipient by email, defaulting to the owner",
-            "Emit inventory.low with SKU, current stock, days of stock left, and velocity for an ordering agent"
+            "Format {{nodes.cooldown.alerts}} sorted by soonest-to-zero, quoting each computed days left, on hand and units per day",
+            "Call out every SKU marked reorderNow as a hard reorder-now flag: it stocks out before a restock can land",
+            "Say \"not available from this store\" for each item in {{nodes.project-stock.notAvailable}}",
+            "Email the alert with mail.message.send to {{inputs.report_recipient}}, or to the owner when it is blank",
+            "Save {{nodes.cooldown.log}} to memory as \"store alert log: stock\", replacing the previous entry",
+            "Emit inventory.low with SKU, current stock, days of stock left and velocity for an ordering agent"
           ],
           "token_budget": {
             "max": 2000
@@ -242,12 +497,94 @@
             "retry": 1,
             "fallback": "notify_owner"
           }
+        },
+        {
+          "id": "stock-clear",
+          "type": "command",
+          "intent": "No SKU is under the low-stock line or inside the restock lead time; the next check reads stock again.",
+          "params": {
+            "command": "echo '{\"summary\": \"No SKU is under the low-stock line or inside the restock lead time; the next check reads stock again.\"}'"
+          },
+          "on_error": {
+            "retry": 0,
+            "fallback": "skip"
+          }
+        },
+        {
+          "id": "nothing-new",
+          "type": "command",
+          "intent": "Every low SKU was already alerted and none got worse; the next check reads stock again.",
+          "params": {
+            "command": "echo '{\"summary\": \"Every low SKU was already alerted and none got worse; the next check reads stock again.\"}'"
+          },
+          "on_error": {
+            "retry": 0,
+            "fallback": "skip"
+          }
         }
       ],
       "budget": {
         "total_per_run": 11500
       },
-      "emit": "inventory.low"
+      "emit": "inventory.low",
+      "connections": [
+        {
+          "from": "__trigger__",
+          "to": "stock"
+        },
+        {
+          "from": "__trigger__",
+          "to": "sales"
+        },
+        {
+          "from": "stock",
+          "to": "keep-stock"
+        },
+        {
+          "from": "keep-stock",
+          "to": "project-stock"
+        },
+        {
+          "from": "sales",
+          "to": "project-stock"
+        },
+        {
+          "from": "project-stock",
+          "to": "any-low"
+        },
+        {
+          "from": "any-low",
+          "to": "recall-alerted",
+          "label": "True"
+        },
+        {
+          "from": "recall-alerted",
+          "to": "cooldown"
+        },
+        {
+          "from": "cooldown",
+          "to": "new-low"
+        },
+        {
+          "from": "new-low",
+          "to": "alert-stock",
+          "label": "True"
+        },
+        {
+          "from": "alert-stock",
+          "to": "__emit__"
+        },
+        {
+          "from": "any-low",
+          "to": "stock-clear",
+          "label": "False"
+        },
+        {
+          "from": "new-low",
+          "to": "nothing-new",
+          "label": "False"
+        }
+      ]
     },
     "product-performance-review": {
       "trigger": {
@@ -256,21 +593,97 @@
       },
       "activities": [
         {
+          "id": "window",
+          "type": "command",
+          "intent": "Read the review_window_days input once and work out how far back to read: the window and the equal window before it.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/window.py --days '{{inputs.review_window_days}}'",
+            "skill": "store-numbers"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "orders",
+          "type": "operation",
+          "params": {
+            "operation": "store.order.list",
+            "input": {
+              "placedSinceDays": "{{nodes.window.fetchDays}}"
+            }
+          },
+          "intent": "Read per-product sales for the review window and the prior equal window from the store connection",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "products",
+          "type": "operation",
+          "params": {
+            "operation": "store.product.list",
+            "input": {
+              "active": true
+            }
+          },
+          "intent": "Read the catalog with unit cost where the store carries it",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "stock",
+          "type": "operation",
+          "params": {
+            "operation": "store.inventory.get",
+            "input": {}
+          },
+          "intent": "Read current stock per SKU",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "keep-products",
+          "type": "command",
+          "intent": "Keep the catalog in a per-run file for the ranking.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/stash.py",
+            "skill": "store-numbers",
+            "stdin": "nodes.products.records"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "keep-stock",
+          "type": "command",
+          "intent": "Keep the stock list in a per-run file for the ranking.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/stash.py",
+            "skill": "store-numbers",
+            "stdin": "nodes.stock.records"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
           "id": "rank-products",
-          "intent": "Rank products by revenue, units, and trend over the review window",
-          "model": "nebo-1",
-          "steps": [
-            "Read the review_window_days input",
-            "Pull per-product sales, catalog, and any cost data from the store for the window",
-            "Mark any per-product figure the store cannot return as not available",
-            "Compute units and revenue per product for the current window and the prior equal window",
-            "Identify top performers by revenue and units with trend, and decliners that sold last period and dropped sharply this one",
-            "Identify dead stock: products with inventory and zero sales over the window",
-            "Where cost data exists, rank by contribution margin so low-margin high-volume items are not mistaken for winners",
-            "Return ranked performer, decliner, and dead-stock lists with numbers"
-          ],
-          "token_budget": {
-            "max": 8000
+          "type": "command",
+          "intent": "Compute units and revenue per product for the current window and the prior equal window; rank top performers with trend, decliners that sold last period and dropped sharply, dead stock with inventory and zero sales, and contribution margin where cost exists. Any per-product figure the store cannot return is null and named in notAvailable.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/product_rank.py --products-file \"{{nodes.keep-products.file}}\" --stock-file \"{{nodes.keep-stock.file}}\" --window-days {{nodes.window.days}} --top 10",
+            "skill": "store-numbers",
+            "stdin": "nodes.orders.records"
           },
           "on_error": {
             "retry": 1,
@@ -281,13 +694,16 @@
           "id": "traffic-context-review",
           "intent": "Add product-level traffic and conversion context where analytics is available",
           "model": "nebo-1",
+          "tools": [
+            "analytics_page_metrics",
+            "analytics_metric_series"
+          ],
           "steps": [
-            "If use_analytics is no, or no analytics connection is bound, skip this activity and continue",
-            "Resolve the store's analytics property through the analytics connection",
-            "Pull product or landing-page sessions and conversion over the review window",
+            "If {{inputs.use_analytics}} is no, or no analytics connection is bound, answer {\"skipped\": true} and stop",
+            "Read product or landing-page sessions and conversion over the last {{nodes.window.days}} days through analytics.page.metrics and analytics.metric.series, for the products in {{nodes.rank-products.performers}} and {{nodes.rank-products.decliners}}",
             "Flag products with high traffic but low conversion as merchandising or pricing problems",
             "Flag declining products whose drop is explained by lost traffic versus lost conversion",
-            "Return a context block; if analytics is unavailable, mark it skipped without blocking the review"
+            "Answer only JSON: {\"skipped\": false, \"products\": [{\"sku\": \"...\", \"sessions\": 0, \"conversion\": 0, \"read\": \"...\"}]}; if analytics is unavailable answer {\"skipped\": true, \"reason\": \"...\"} without blocking the review"
           ],
           "token_budget": {
             "max": 2000
@@ -301,13 +717,16 @@
           "id": "deliver-review",
           "intent": "Compile and deliver the weekly product performance review",
           "model": "nebo-1",
+          "tools": [
+            "mail_message_send"
+          ],
           "steps": [
-            "Lead with the week's top performers by revenue and by margin with trend",
-            "Surface decliners as the priority section since they are the silent revenue leaks",
-            "List dead stock with current inventory value tied up",
-            "Fold in the traffic-context block to diagnose decliners and underperformers",
+            "Lead with the top performers from {{nodes.rank-products.performers}} and, where cost exists, {{nodes.rank-products.byMargin}}, quoting the computed revenue, units, margin and change",
+            "Surface the decliners in {{nodes.rank-products.decliners}} as the priority section, since they are the silent revenue leaks",
+            "List the dead stock in {{nodes.rank-products.deadStock}} with the computed value tied up ({{nodes.rank-products.deadStockValueCents}} cents in all), and say \"not available from this store\" for each item in {{nodes.rank-products.notAvailable}}",
+            "Fold in the traffic context from the previous step to diagnose decliners and underperformers; leave it out if it was skipped",
             "Recommend concrete actions: promote, discount to clear, reorder, or retire",
-            "Send the review to report_recipient by email, defaulting to the owner",
+            "Send the review with mail.message.send to {{inputs.report_recipient}}, or to the owner when it is blank",
             "Emit report.ready with the ranked lists and recommended actions"
           ],
           "token_budget": {
@@ -322,7 +741,57 @@
       "budget": {
         "total_per_run": 14375
       },
-      "emit": "report.ready"
+      "emit": "report.ready",
+      "connections": [
+        {
+          "from": "__trigger__",
+          "to": "window"
+        },
+        {
+          "from": "window",
+          "to": "orders"
+        },
+        {
+          "from": "__trigger__",
+          "to": "products"
+        },
+        {
+          "from": "__trigger__",
+          "to": "stock"
+        },
+        {
+          "from": "products",
+          "to": "keep-products"
+        },
+        {
+          "from": "stock",
+          "to": "keep-stock"
+        },
+        {
+          "from": "orders",
+          "to": "rank-products"
+        },
+        {
+          "from": "keep-products",
+          "to": "rank-products"
+        },
+        {
+          "from": "keep-stock",
+          "to": "rank-products"
+        },
+        {
+          "from": "rank-products",
+          "to": "traffic-context-review"
+        },
+        {
+          "from": "traffic-context-review",
+          "to": "deliver-review"
+        },
+        {
+          "from": "deliver-review",
+          "to": "__emit__"
+        }
+      ]
     },
     "check-store": {
       "trigger": {
@@ -330,30 +799,156 @@
       },
       "activities": [
         {
-          "id": "store-snapshot",
-          "intent": "Give an on-demand snapshot of sales, open issues, and low stock right now",
-          "model": "nebo-1",
-          "steps": [
-            "Read the store connection; it resolves whichever platform the company runs",
-            "Pull today's running revenue, order count, and AOV with comparison to the same point on prior days",
-            "Scan the order pipeline for any currently stuck, failed, or unfulfilled paid orders",
-            "Pull current stock and compute days of stock left for the fastest-moving SKUs",
-            "Assemble a one-screen snapshot: sales headline, open issues count with worst offenders, low-stock SKUs by days left",
-            "Sort every section by impact and finish with the single most important action right now",
-            "If everything is within normal range, return a concise all-clear"
-          ],
-          "token_budget": {
-            "max": 12000
+          "id": "orders",
+          "type": "operation",
+          "params": {
+            "operation": "store.order.list",
+            "input": {
+              "placedSinceDays": 32
+            }
+          },
+          "intent": "Read the last 32 days of orders from the store connection; it resolves whichever platform the company runs",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "stock",
+          "type": "operation",
+          "params": {
+            "operation": "store.inventory.get",
+            "input": {}
+          },
+          "intent": "Read current stock per SKU",
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "keep-stock",
+          "type": "command",
+          "intent": "Keep the stock list in a per-run file so the projection can join it with the sales.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/stash.py",
+            "skill": "store-numbers",
+            "stdin": "nodes.stock.records"
           },
           "on_error": {
             "retry": 1,
             "fallback": "abort"
           }
+        },
+        {
+          "id": "sales-now",
+          "type": "command",
+          "intent": "Today's running revenue, order count and AOV, each against the same point of the prior day, the prior same weekday and the 30-day average.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/sales_day.py --day today --top 3",
+            "skill": "store-numbers",
+            "stdin": "nodes.orders.records"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "issues-now",
+          "type": "command",
+          "intent": "Every order currently stuck, failed or paid and unfulfilled.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/order_issues.py --stuck-hours '{{inputs.stuck_processing_hours}}' --hold-hours 72 --recent-hours 24",
+            "skill": "store-numbers",
+            "stdin": "nodes.orders.records"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "stock-now",
+          "type": "command",
+          "intent": "Days of stock left for the SKUs under the line, fastest movers first.",
+          "params": {
+            "command": "python3 ${NEBO_SKILL_DIR}/scripts/stock_cover.py --stock-file \"{{nodes.keep-stock.file}}\" --low-days '{{inputs.low_stock_days}}' --lead-days '{{inputs.reorder_lead_time_days}}' --window-days 30 --top 10",
+            "skill": "store-numbers",
+            "stdin": "nodes.orders.records"
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "abort"
+          }
+        },
+        {
+          "id": "store-snapshot",
+          "intent": "Give an on-demand snapshot of sales, open issues, and low stock right now",
+          "model": "nebo-1",
+          "tools": [],
+          "steps": [
+            "Sales headline from {{nodes.sales-now.current}} with its deltas from {{nodes.sales-now.deltaPct}} and the comparison basis",
+            "Open issues: {{nodes.issues-now.count}} in all, with the worst offenders from {{nodes.issues-now.issues}}",
+            "Low stock: the SKUs in {{nodes.stock-now.flagged}} by days left",
+            "Quote the computed figures only; say \"not available from this store\" for each item in {{nodes.sales-now.notAvailable}}, {{nodes.issues-now.notAvailable}} and {{nodes.stock-now.notAvailable}}",
+            "Sort every section by impact and finish with the single most important action right now",
+            "If everything is within normal range, return a concise all-clear"
+          ],
+          "token_budget": {
+            "max": 4000
+          },
+          "on_error": {
+            "retry": 1,
+            "fallback": "notify_owner"
+          }
         }
       ],
       "budget": {
         "total_per_run": 13800
-      }
+      },
+      "connections": [
+        {
+          "from": "__trigger__",
+          "to": "orders"
+        },
+        {
+          "from": "__trigger__",
+          "to": "stock"
+        },
+        {
+          "from": "stock",
+          "to": "keep-stock"
+        },
+        {
+          "from": "orders",
+          "to": "sales-now"
+        },
+        {
+          "from": "orders",
+          "to": "issues-now"
+        },
+        {
+          "from": "orders",
+          "to": "stock-now"
+        },
+        {
+          "from": "keep-stock",
+          "to": "stock-now"
+        },
+        {
+          "from": "sales-now",
+          "to": "store-snapshot"
+        },
+        {
+          "from": "issues-now",
+          "to": "store-snapshot"
+        },
+        {
+          "from": "stock-now",
+          "to": "store-snapshot"
+        }
+      ]
     }
   },
   "requires": {
@@ -381,5 +976,7 @@
       "workflows.product-performance-review.trigger.cron"
     ]
   },
-  "skills": []
+  "skills": [
+    "store-numbers"
+  ]
 }
