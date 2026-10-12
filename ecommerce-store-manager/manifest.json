@@ -1,6 +1,6 @@
 {
   "name": "@neboai/agents/ecommerce-store-manager",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Runs your online store day to day. Daily sales reports, order-issue scans, product performance reviews, and low-stock alerts \u2014 on whichever store platform your business already runs.",
   "type": "agent",
   "id": "ecommerce-store-manager"
